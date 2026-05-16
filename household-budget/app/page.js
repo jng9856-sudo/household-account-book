@@ -105,7 +105,7 @@ function EntryModal({ day, year, month, onAdd, onClose }) {
           <div>
             <label className="block text-xs font-semibold mb-2 uppercase tracking-wider" style={{ color: '#7a6e5a' }}>사용자</label>
             <div className="flex gap-2">
-              {['공동', '남규', '와이프'].map(w => (
+              {['공동', '남규', '다경'].map(w => (
                 <button key={w} type="button"
                   onClick={() => setWho(w)}
                   className="flex-1 py-2 rounded-xl text-sm font-medium transition-all"
