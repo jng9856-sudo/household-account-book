@@ -1,0 +1,43 @@
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #fdfcf7;
+  --surface: #ffffff;
+  --border: #e8e0d0;
+  --text-primary: #2c2415;
+  --text-secondary: #7a6e5a;
+  --accent-green: #5d8a62;
+  --accent-clay: #b06a4e;
+  --accent-gold: #c9943a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: 'Pretendard', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4c9b4; border-radius: 3px; }
+
+/* Custom animations */
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-slideUp { animation: slideUp 0.3s ease forwards; }
+.animate-fadeIn { animation: fadeIn 0.2s ease forwards; }
