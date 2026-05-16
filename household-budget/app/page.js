@@ -41,6 +41,44 @@ function useFixedExpenses() {
   return { fixed, updateItem, addItem, removeItem }
 }
 
+// ─── 저축 hook ───────────────────────────────────────────────────────────────
+function useSavings() {
+  const [monthSavings, setMonthSavings] = useState({}) // { '2026_05': 300000, ... }
+  const [targetAmount, setTargetAmount] = useState(200000000) // 매매자금 목표
+
+  useEffect(() => {
+    try {
+      const ms = localStorage.getItem('month_savings')
+      const ta = localStorage.getItem('target_amount')
+      if (ms) setMonthSavings(JSON.parse(ms))
+      if (ta) setTargetAmount(Number(ta))
+    } catch {}
+  }, [])
+
+  const setMonthSaving = useCallback((year, month, amount) => {
+    setMonthSavings(prev => {
+      const k = `${year}_${String(month + 1).padStart(2, '0')}`
+      const next = { ...prev, [k]: amount }
+      try { localStorage.setItem('month_savings', JSON.stringify(next)) } catch {}
+      return next
+    })
+  }, [])
+
+  const getMonthSaving = useCallback((year, month) => {
+    const k = `${year}_${String(month + 1).padStart(2, '0')}`
+    return monthSavings[k] || 0
+  }, [monthSavings])
+
+  const totalSavings = Object.values(monthSavings).reduce((s, v) => s + v, 0)
+
+  const updateTarget = useCallback((amount) => {
+    setTargetAmount(amount)
+    try { localStorage.setItem('target_amount', String(amount)) } catch {}
+  }, [])
+
+  return { getMonthSaving, setMonthSaving, totalSavings, targetAmount, updateTarget }
+}
+
 // ─── 변동비 월 데이터 hook ────────────────────────────────────────────────────
 function useMonthData(year, month) {
   const [data, setData] = useState({})
@@ -502,6 +540,18 @@ export default function Home() {
   const firstDay = getFirstDayOfWeek(year, month)
   const monthNames = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월']
 
+  const [showMonthPicker, setShowMonthPicker] = useState(false)
+  const [pickerYear, setPickerYear] = useState(now.getFullYear())
+  const { getMonthSaving, setMonthSaving, totalSavings, targetAmount, updateTarget } = useSavings()
+  const [editSaving, setEditSaving] = useState(false)
+  const [editTarget, setEditTarget] = useState(false)
+  const [savingInput, setSavingInput] = useState('')
+  const [targetInput, setTargetInput] = useState('')
+
+  const thisMonthSaving = getMonthSaving(year, month)
+  const savingPct = targetAmount > 0 ? Math.min(100, (totalSavings / targetAmount) * 100) : 0
+  const fmt = (v) => { const n = v.replace(/[^0-9]/g,''); return n ? Number(n).toLocaleString() : '' }
+
   const prevMonth = () => {
     if (month === 0) { setYear(y => y - 1); setMonth(11) } else setMonth(m => m - 1)
     setSelectedDay(null)
@@ -533,14 +583,45 @@ export default function Home() {
       </header>
 
       <div className="max-w-lg mx-auto px-4 pb-8">
-        <div className="mt-4 p-4 rounded-2xl"
+        {/* 요약 카드 */}
+        <div className="mt-4 rounded-2xl overflow-hidden"
           style={{ background: 'linear-gradient(135deg, #5d8a62, #4a7050)', color: '#fff' }}>
-          <div className="flex items-center justify-between mb-3">
+
+          {/* 연월 네비게이션 */}
+          <div className="flex items-center justify-between px-4 pt-4 pb-2">
             <button onClick={prevMonth} className="w-8 h-8 rounded-xl flex items-center justify-center hover:bg-white/10 transition-all">←</button>
-            <h2 className="text-xl font-black">{year}년 {monthNames[month]}</h2>
+            <button onClick={() => { setShowMonthPicker(v => !v); setPickerYear(year) }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-white/10 transition-all">
+              <span className="text-xl font-black">{year}년 {monthNames[month]}</span>
+              <span className="text-sm opacity-70">{showMonthPicker ? '▲' : '▼'}</span>
+            </button>
             <button onClick={nextMonth} className="w-8 h-8 rounded-xl flex items-center justify-center hover:bg-white/10 transition-all">→</button>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+
+          {/* 연월 피커 드롭다운 */}
+          {showMonthPicker && (
+            <div className="mx-4 mb-3 rounded-xl overflow-hidden" style={{ background: 'rgba(0,0,0,0.2)' }}>
+              <div className="flex items-center justify-between px-3 py-2">
+                <button onClick={() => setPickerYear(y => y - 1)} className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/10">←</button>
+                <span className="text-sm font-bold">{pickerYear}년</span>
+                <button onClick={() => setPickerYear(y => y + 1)} className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/10">→</button>
+              </div>
+              <div className="grid grid-cols-6 gap-1 px-2 pb-2">
+                {monthNames.map((mn, mi) => (
+                  <button key={mi}
+                    onClick={() => { setYear(pickerYear); setMonth(mi); setShowMonthPicker(false); setSelectedDay(null) }}
+                    className="py-1.5 rounded-lg text-xs font-bold transition-all"
+                    style={{
+                      background: pickerYear === year && mi === month ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.15)',
+                      color: pickerYear === year && mi === month ? '#4a7050' : '#fff',
+                    }}>{mi + 1}월</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 변동비 / 고정비 */}
+          <div className="grid grid-cols-2 gap-3 px-4 pb-3">
             <div className="p-3 rounded-xl" style={{ background: 'rgba(255,255,255,0.15)' }}>
               <p className="text-xs opacity-80 mb-1">변동비</p>
               <p className="text-lg font-black">{formatKRW(monthTotal)}</p>
@@ -550,10 +631,83 @@ export default function Home() {
               <p className="text-lg font-black">{formatKRW(fixedTotal)}</p>
             </div>
           </div>
-          <div className="mt-2 pt-2" style={{ borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+
+          {/* 총 지출 */}
+          <div className="px-4 pb-3" style={{ borderTop: '1px solid rgba(255,255,255,0.15)', paddingTop: '10px' }}>
             <div className="flex justify-between items-center">
               <span className="text-sm opacity-80">이번달 총 지출</span>
               <span className="text-xl font-black">{formatKRW(monthTotal + fixedTotal)}</span>
+            </div>
+          </div>
+
+          {/* 이번달 저축 / 총 저축 */}
+          <div className="grid grid-cols-2 gap-3 px-4 pb-3" style={{ borderTop: '1px solid rgba(255,255,255,0.15)', paddingTop: '10px' }}>
+            {/* 이번달 저축 */}
+            <div className="p-3 rounded-xl" style={{ background: 'rgba(255,255,255,0.15)' }}>
+              <p className="text-xs opacity-80 mb-1">이번달 저축</p>
+              {editSaving ? (
+                <div className="flex items-center gap-1">
+                  <input autoFocus type="text" inputMode="numeric"
+                    value={savingInput}
+                    onChange={e => setSavingInput(fmt(e.target.value))}
+                    onBlur={() => { setMonthSaving(year, month, Number(savingInput.replace(/,/g,''))); setEditSaving(false) }}
+                    onKeyDown={e => { if (e.key === 'Enter') { setMonthSaving(year, month, Number(savingInput.replace(/,/g,''))); setEditSaving(false) } }}
+                    className="w-full bg-transparent outline-none font-black text-sm text-white border-b border-white/50"
+                    placeholder="0"
+                    style={{ color: '#fff' }}
+                  />
+                </div>
+              ) : (
+                <button onClick={() => { setSavingInput(thisMonthSaving.toLocaleString()); setEditSaving(true) }}
+                  className="text-left w-full">
+                  <p className="text-lg font-black">{formatKRW(thisMonthSaving)}</p>
+                  <p className="text-[10px] opacity-60 mt-0.5">탭하여 수정 ✏️</p>
+                </button>
+              )}
+            </div>
+
+            {/* 총 저축 */}
+            <div className="p-3 rounded-xl" style={{ background: 'rgba(255,255,255,0.15)' }}>
+              <p className="text-xs opacity-80 mb-1">총 저축액</p>
+              <p className="text-lg font-black">{formatKRW(totalSavings)}</p>
+              <p className="text-[10px] opacity-60 mt-0.5">전체 누적</p>
+            </div>
+          </div>
+
+          {/* 매매자금 목표 게이지 */}
+          <div className="px-4 pb-4" style={{ borderTop: '1px solid rgba(255,255,255,0.15)', paddingTop: '10px' }}>
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-sm font-bold opacity-90">🏠 매매자금 목표</span>
+              {editTarget ? (
+                <div className="flex items-center gap-1">
+                  <span className="text-xs opacity-70">₩</span>
+                  <input autoFocus type="text" inputMode="numeric"
+                    value={targetInput}
+                    onChange={e => setTargetInput(fmt(e.target.value))}
+                    onBlur={() => { updateTarget(Number(targetInput.replace(/,/g,''))); setEditTarget(false) }}
+                    onKeyDown={e => { if (e.key === 'Enter') { updateTarget(Number(targetInput.replace(/,/g,''))); setEditTarget(false) } }}
+                    className="bg-transparent outline-none font-bold text-sm border-b border-white/50 w-28 text-right"
+                    style={{ color: '#fff' }}
+                  />
+                </div>
+              ) : (
+                <button onClick={() => { setTargetInput(targetAmount.toLocaleString()); setEditTarget(true) }}
+                  className="text-sm font-bold opacity-90 flex items-center gap-1">
+                  {formatKRW(targetAmount)} <span className="text-[10px] opacity-60">✏️</span>
+                </button>
+              )}
+            </div>
+            {/* 게이지 바 */}
+            <div className="h-3 rounded-full overflow-hidden" style={{ background: 'rgba(0,0,0,0.25)' }}>
+              <div className="h-full rounded-full transition-all duration-700"
+                style={{
+                  width: `${savingPct}%`,
+                  background: savingPct >= 100 ? '#f0c040' : 'linear-gradient(90deg, rgba(255,255,255,0.6), rgba(255,255,255,0.9))'
+                }} />
+            </div>
+            <div className="flex justify-between mt-1.5">
+              <span className="text-xs opacity-70">{formatKRW(totalSavings)} 달성</span>
+              <span className="text-xs font-bold">{savingPct.toFixed(1)}%</span>
             </div>
           </div>
         </div>
