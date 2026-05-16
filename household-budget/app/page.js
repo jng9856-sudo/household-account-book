@@ -1,114 +1,135 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import { db } from './firebase'
+import {
+  doc, onSnapshot, setDoc, updateDoc, getDoc
+} from 'firebase/firestore'
 import { FIXED_EXPENSES, VARIABLE_CATEGORIES, formatKRW, getCategoryById } from './constants'
 
 const today = () => new Date()
-const key = (y, m) => `budget_${y}_${m < 10 ? '0' + m : m}`
+const monthKey = (y, m) => `${y}_${String(m + 1).padStart(2, '0')}`
 function getDaysInMonth(year, month) { return new Date(year, month + 1, 0).getDate() }
 function getFirstDayOfWeek(year, month) { return new Date(year, month, 1).getDay() }
 
-// ─── 고정비 hook ──────────────────────────────────────────────────────────────
+// ─── 고정비 hook (Firebase) ───────────────────────────────────────────────────
 function useFixedExpenses() {
   const [fixed, setFixed] = useState(FIXED_EXPENSES)
+  const [ready, setReady] = useState(false)
+  const ref = doc(db, 'budget', 'fixed_expenses')
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('fixed_expenses')
-      if (raw) setFixed(JSON.parse(raw))
-    } catch {}
+    const unsub = onSnapshot(ref, snap => {
+      if (snap.exists()) setFixed(snap.data().items || FIXED_EXPENSES)
+      else setDoc(ref, { items: FIXED_EXPENSES })
+      setReady(true)
+    })
+    return unsub
   }, [])
 
-  const persist = (data) => {
-    try { localStorage.setItem('fixed_expenses', JSON.stringify(data)) } catch {}
-  }
+  const persist = useCallback(async (items) => {
+    await setDoc(ref, { items })
+  }, [])
 
   const updateItem = useCallback((id, fields) => {
     setFixed(prev => {
       const next = prev.map(e => e.id === id ? { ...e, ...fields } : e)
-      persist(next); return next
+      persist(next)
+      return next
     })
-  }, [])
+  }, [persist])
 
   const addItem = useCallback((item) => {
     setFixed(prev => { const next = [...prev, item]; persist(next); return next })
-  }, [])
+  }, [persist])
 
   const removeItem = useCallback((id) => {
     setFixed(prev => { const next = prev.filter(e => e.id !== id); persist(next); return next })
-  }, [])
+  }, [persist])
 
-  return { fixed, updateItem, addItem, removeItem }
+  return { fixed, updateItem, addItem, removeItem, ready }
 }
 
-// ─── 저축 hook ───────────────────────────────────────────────────────────────
-function useSavings() {
-  const [monthSavings, setMonthSavings] = useState({}) // { '2026_05': 300000, ... }
-  const [targetAmount, setTargetAmount] = useState(200000000) // 매매자금 목표
+// ─── 변동비 월 데이터 hook (Firebase) ────────────────────────────────────────
+function useMonthData(year, month) {
+  const [data, setData] = useState({})
+  const mk = monthKey(year, month)
+  const ref = doc(db, 'budget', `month_${mk}`)
 
   useEffect(() => {
-    try {
-      const ms = localStorage.getItem('month_savings')
-      const ta = localStorage.getItem('target_amount')
-      if (ms) setMonthSavings(JSON.parse(ms))
-      if (ta) setTargetAmount(Number(ta))
-    } catch {}
+    setData({})
+    const unsub = onSnapshot(ref, snap => {
+      if (snap.exists()) setData(snap.data().days || {})
+      else setData({})
+    })
+    return unsub
+  }, [mk])
+
+  const addEntry = useCallback(async (day, entry) => {
+    const dayKey = String(day)
+    const snap = await getDoc(ref)
+    const current = snap.exists() ? (snap.data().days || {}) : {}
+    const updated = {
+      ...current,
+      [dayKey]: [...(current[dayKey] || []), { ...entry, id: Date.now() }]
+    }
+    await setDoc(ref, { days: updated })
+  }, [mk])
+
+  const deleteEntry = useCallback(async (day, entryId) => {
+    const dayKey = String(day)
+    const snap = await getDoc(ref)
+    const current = snap.exists() ? (snap.data().days || {}) : {}
+    const updated = {
+      ...current,
+      [dayKey]: (current[dayKey] || []).filter(e => e.id !== entryId)
+    }
+    await setDoc(ref, { days: updated })
+  }, [mk])
+
+  const monthTotal = Object.values(data).flat().reduce((s, e) => s + (e.amount || 0), 0)
+  return { data, addEntry, deleteEntry, monthTotal }
+}
+
+// ─── 저축 hook (Firebase) ─────────────────────────────────────────────────────
+function useSavings() {
+  const [monthSavings, setMonthSavings] = useState({})
+  const [targetAmount, setTargetAmount] = useState(200000000)
+  const ref = doc(db, 'budget', 'savings')
+
+  useEffect(() => {
+    const unsub = onSnapshot(ref, snap => {
+      if (snap.exists()) {
+        const d = snap.data()
+        setMonthSavings(d.months || {})
+        setTargetAmount(d.target ?? 200000000)
+      }
+    })
+    return unsub
   }, [])
 
-  const setMonthSaving = useCallback((year, month, amount) => {
-    setMonthSavings(prev => {
-      const k = `${year}_${String(month + 1).padStart(2, '0')}`
-      const next = { ...prev, [k]: amount }
-      try { localStorage.setItem('month_savings', JSON.stringify(next)) } catch {}
-      return next
+  const setMonthSaving = useCallback(async (year, month, amount) => {
+    const k = monthKey(year, month)
+    const snap = await getDoc(ref)
+    const current = snap.exists() ? snap.data() : {}
+    await setDoc(ref, {
+      ...current,
+      months: { ...(current.months || {}), [k]: amount }
     })
   }, [])
 
   const getMonthSaving = useCallback((year, month) => {
-    const k = `${year}_${String(month + 1).padStart(2, '0')}`
-    return monthSavings[k] || 0
+    return monthSavings[monthKey(year, month)] || 0
   }, [monthSavings])
 
-  const totalSavings = Object.values(monthSavings).reduce((s, v) => s + v, 0)
-
-  const updateTarget = useCallback((amount) => {
-    setTargetAmount(amount)
-    try { localStorage.setItem('target_amount', String(amount)) } catch {}
+  const updateTarget = useCallback(async (amount) => {
+    const snap = await getDoc(ref)
+    const current = snap.exists() ? snap.data() : {}
+    await setDoc(ref, { ...current, target: amount })
   }, [])
 
+  const totalSavings = Object.values(monthSavings).reduce((s, v) => s + v, 0)
   return { getMonthSaving, setMonthSaving, totalSavings, targetAmount, updateTarget }
-}
-
-// ─── 변동비 월 데이터 hook ────────────────────────────────────────────────────
-function useMonthData(year, month) {
-  const [data, setData] = useState({})
-  const storageKey = key(year, month)
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(storageKey)
-      setData(raw ? JSON.parse(raw) : {})
-    } catch { setData({}) }
-  }, [storageKey])
-
-  const addEntry = useCallback((day, entry) => {
-    setData(prev => {
-      const next = { ...prev, [String(day)]: [...(prev[String(day)] || []), { ...entry, id: Date.now() }] }
-      try { localStorage.setItem(storageKey, JSON.stringify(next)) } catch {}
-      return next
-    })
-  }, [storageKey])
-
-  const deleteEntry = useCallback((day, entryId) => {
-    setData(prev => {
-      const next = { ...prev, [String(day)]: (prev[String(day)] || []).filter(e => e.id !== entryId) }
-      try { localStorage.setItem(storageKey, JSON.stringify(next)) } catch {}
-      return next
-    })
-  }, [storageKey])
-
-  const monthTotal = Object.values(data).flat().reduce((s, e) => s + (e.amount || 0), 0)
-  return { data, addEntry, deleteEntry, monthTotal }
 }
 
 // ─── 지출 추가 모달 ───────────────────────────────────────────────────────────
@@ -117,14 +138,17 @@ function EntryModal({ day, year, month, onAdd, onClose }) {
   const [amount, setAmount] = useState('')
   const [memo, setMemo] = useState('')
   const [who, setWho] = useState('공동')
+  const [saving, setSaving] = useState(false)
 
   const fmt = (v) => { const n = v.replace(/[^0-9]/g, ''); return n ? Number(n).toLocaleString() : '' }
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     const amt = Number(amount.replace(/,/g, ''))
     if (!amt) return
-    onAdd(day, { category, amount: amt, memo, who })
+    setSaving(true)
+    await onAdd(day, { category, amount: amt, memo, who })
+    setSaving(false)
     onClose()
   }
 
@@ -182,8 +206,10 @@ function EntryModal({ day, year, month, onAdd, onClose }) {
               className="w-full px-4 py-3 rounded-xl outline-none"
               style={{ background: '#f0e9d2', border: '1.5px solid #e8e0d0', color: '#2c2415' }} />
           </div>
-          <button type="submit" className="w-full py-3.5 rounded-xl font-bold text-white active:scale-95 transition-all"
-            style={{ background: 'linear-gradient(135deg, #5d8a62, #4a7050)' }}>추가하기</button>
+          <button type="submit" disabled={saving} className="w-full py-3.5 rounded-xl font-bold text-white active:scale-95 transition-all"
+            style={{ background: saving ? '#9ab89e' : 'linear-gradient(135deg, #5d8a62, #4a7050)' }}>
+            {saving ? '저장 중...' : '추가하기'}
+          </button>
         </form>
       </div>
     </div>
@@ -267,36 +293,16 @@ function FixedPanel({ fixed, fixedTotal, onUpdate, onAdd, onRemove, onClose }) {
   const [showNewIconPicker, setShowNewIconPicker] = useState(false)
 
   const fmt = (v) => { const n = v.replace(/[^0-9]/g, ''); return n ? Number(n).toLocaleString() : '' }
-
-  const startEdit = (exp) => {
-    setEditId(exp.id); setEditName(exp.name)
-    setEditAmount(exp.amount.toLocaleString()); setEditIcon(exp.icon)
-    setShowIconPicker(false); setShowAdd(false)
-  }
-
-  const saveEdit = () => {
-    const amt = Number(editAmount.replace(/,/g, ''))
-    if (!editName || !amt) return
-    onUpdate(editId, { name: editName, amount: amt, icon: editIcon })
-    setEditId(null)
-  }
-
-  const handleAdd = () => {
-    const amt = Number(newAmount.replace(/,/g, ''))
-    if (!newName || !amt) return
-    onAdd({ id: `custom_${Date.now()}`, name: newName, amount: amt, icon: newIcon, color: '#7a9e7e' })
-    setNewName(''); setNewAmount(''); setNewIcon('📝'); setShowAdd(false)
-  }
+  const startEdit = (exp) => { setEditId(exp.id); setEditName(exp.name); setEditAmount(exp.amount.toLocaleString()); setEditIcon(exp.icon); setShowIconPicker(false); setShowAdd(false) }
+  const saveEdit = () => { const a = Number(editAmount.replace(/,/g, '')); if (!editName || !a) return; onUpdate(editId, { name: editName, amount: a, icon: editIcon }); setEditId(null) }
+  const handleAdd = () => { const a = Number(newAmount.replace(/,/g, '')); if (!newName || !a) return; onAdd({ id: `custom_${Date.now()}`, name: newName, amount: a, icon: newIcon, color: '#7a9e7e' }); setNewName(''); setNewAmount(''); setNewIcon('📝'); setShowAdd(false) }
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4"
       style={{ background: 'rgba(44,36,21,0.5)', backdropFilter: 'blur(4px)' }}>
       <div className="w-full max-w-md rounded-2xl overflow-hidden animate-slideUp"
         style={{ background: '#fdfcf7', border: '1px solid #e8e0d0', boxShadow: '0 20px 60px rgba(0,0,0,0.15)', maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}>
-
-        {/* 헤더 */}
-        <div className="flex items-center justify-between px-5 py-4"
-          style={{ background: '#f9f5eb', borderBottom: '1px solid #e8e0d0' }}>
+        <div className="flex items-center justify-between px-5 py-4" style={{ background: '#f9f5eb', borderBottom: '1px solid #e8e0d0' }}>
           <div>
             <h3 className="text-lg font-black" style={{ color: '#2c2415' }}>📌 고정비 관리</h3>
             <p className="text-sm font-semibold mt-0.5" style={{ color: '#b06a4e' }}>월 합계 {formatKRW(fixedTotal)}</p>
@@ -307,115 +313,59 @@ function FixedPanel({ fixed, fixedTotal, onUpdate, onAdd, onRemove, onClose }) {
               style={{ background: showAdd ? '#5d8a62' : '#e8e0d0', color: showAdd ? '#fff' : '#7a6e5a' }}>
               {showAdd ? '취소' : '+ 추가'}
             </button>
-            <button onClick={onClose} className="w-9 h-9 rounded-xl flex items-center justify-center"
-              style={{ background: '#e8e0d0', color: '#7a6e5a' }}>✕</button>
+            <button onClick={onClose} className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: '#e8e0d0', color: '#7a6e5a' }}>✕</button>
           </div>
         </div>
-
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
-
-          {/* 새 항목 추가 폼 */}
           {showAdd && (
-            <div className="p-4 rounded-2xl space-y-3 animate-slideUp"
-              style={{ background: '#fff', border: '2px solid #5d8a62' }}>
+            <div className="p-4 rounded-2xl space-y-3" style={{ background: '#fff', border: '2px solid #5d8a62' }}>
               <p className="text-xs font-bold uppercase tracking-wider" style={{ color: '#5d8a62' }}>새 고정비 추가</p>
               <div>
                 <label className="block text-xs font-semibold mb-1.5" style={{ color: '#7a6e5a' }}>아이콘</label>
-                <button type="button" onClick={() => setShowNewIconPicker(v => !v)}
-                  className="w-10 h-10 rounded-xl text-xl flex items-center justify-center"
-                  style={{ background: '#f0e9d2', border: '1.5px solid #e0d4b8' }}>{newIcon}</button>
-                {showNewIconPicker && (
-                  <div className="mt-2 p-2 rounded-xl flex flex-wrap gap-1.5"
-                    style={{ background: '#f9f5eb', border: '1px solid #e8e0d0' }}>
-                    {ICON_OPTIONS.map(ic => (
-                      <button key={ic} onClick={() => { setNewIcon(ic); setShowNewIconPicker(false) }}
-                        className="w-9 h-9 rounded-lg text-lg flex items-center justify-center"
-                        style={{ background: newIcon === ic ? '#5d8a62' : '#fff' }}>{ic}</button>
-                    ))}
-                  </div>
-                )}
+                <button onClick={() => setShowNewIconPicker(v => !v)} className="w-10 h-10 rounded-xl text-xl flex items-center justify-center" style={{ background: '#f0e9d2', border: '1.5px solid #e0d4b8' }}>{newIcon}</button>
+                {showNewIconPicker && <div className="mt-2 p-2 rounded-xl flex flex-wrap gap-1.5" style={{ background: '#f9f5eb', border: '1px solid #e8e0d0' }}>{ICON_OPTIONS.map(ic => <button key={ic} onClick={() => { setNewIcon(ic); setShowNewIconPicker(false) }} className="w-9 h-9 rounded-lg text-lg flex items-center justify-center" style={{ background: newIcon === ic ? '#5d8a62' : '#fff' }}>{ic}</button>)}</div>}
               </div>
               <div>
                 <label className="block text-xs font-semibold mb-1.5" style={{ color: '#7a6e5a' }}>항목명</label>
-                <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
-                  placeholder="예: 헬스장, 넷플릭스..."
-                  className="w-full px-3 py-2.5 rounded-xl outline-none text-sm"
-                  style={{ background: '#f0e9d2', border: '1.5px solid #e8e0d0', color: '#2c2415' }} />
+                <input type="text" value={newName} onChange={e => setNewName(e.target.value)} placeholder="예: 헬스장, 넷플릭스..." className="w-full px-3 py-2.5 rounded-xl outline-none text-sm" style={{ background: '#f0e9d2', border: '1.5px solid #e8e0d0', color: '#2c2415' }} />
               </div>
               <div>
                 <label className="block text-xs font-semibold mb-1.5" style={{ color: '#7a6e5a' }}>월 금액</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold" style={{ color: '#7a6e5a' }}>₩</span>
-                  <input type="text" inputMode="numeric" value={newAmount} onChange={e => setNewAmount(fmt(e.target.value))}
-                    placeholder="0" className="w-full pl-8 pr-3 py-2.5 rounded-xl text-right outline-none font-bold text-sm"
-                    style={{ background: '#f0e9d2', border: '1.5px solid #e8e0d0', color: '#2c2415' }} />
-                </div>
+                <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold" style={{ color: '#7a6e5a' }}>₩</span><input type="text" inputMode="numeric" value={newAmount} onChange={e => setNewAmount(fmt(e.target.value))} placeholder="0" className="w-full pl-8 pr-3 py-2.5 rounded-xl text-right outline-none font-bold text-sm" style={{ background: '#f0e9d2', border: '1.5px solid #e8e0d0', color: '#2c2415' }} /></div>
               </div>
-              <button onClick={handleAdd} className="w-full py-2.5 rounded-xl font-bold text-white text-sm"
-                style={{ background: '#5d8a62' }}>추가하기</button>
+              <button onClick={handleAdd} className="w-full py-2.5 rounded-xl font-bold text-white text-sm" style={{ background: '#5d8a62' }}>추가하기</button>
             </div>
           )}
-
-          {/* 기존 항목 목록 */}
           {fixed.map(exp => (
             <div key={exp.id}>
               {editId === exp.id ? (
-                /* 수정 모드 */
-                <div className="p-4 rounded-2xl space-y-3 animate-slideUp"
-                  style={{ background: '#fff', border: '2px solid #c9943a' }}>
+                <div className="p-4 rounded-2xl space-y-3" style={{ background: '#fff', border: '2px solid #c9943a' }}>
                   <p className="text-xs font-bold uppercase tracking-wider" style={{ color: '#c9943a' }}>수정 중</p>
                   <div>
                     <label className="block text-xs font-semibold mb-1.5" style={{ color: '#7a6e5a' }}>아이콘</label>
-                    <button type="button" onClick={() => setShowIconPicker(v => !v)}
-                      className="w-10 h-10 rounded-xl text-xl flex items-center justify-center"
-                      style={{ background: '#f0e9d2', border: '1.5px solid #c9943a' }}>{editIcon}</button>
-                    {showIconPicker && (
-                      <div className="mt-2 p-2 rounded-xl flex flex-wrap gap-1.5"
-                        style={{ background: '#f9f5eb', border: '1px solid #e8e0d0' }}>
-                        {ICON_OPTIONS.map(ic => (
-                          <button key={ic} onClick={() => { setEditIcon(ic); setShowIconPicker(false) }}
-                            className="w-9 h-9 rounded-lg text-lg flex items-center justify-center"
-                            style={{ background: editIcon === ic ? '#c9943a' : '#fff' }}>{ic}</button>
-                        ))}
-                      </div>
-                    )}
+                    <button onClick={() => setShowIconPicker(v => !v)} className="w-10 h-10 rounded-xl text-xl flex items-center justify-center" style={{ background: '#f0e9d2', border: '1.5px solid #c9943a' }}>{editIcon}</button>
+                    {showIconPicker && <div className="mt-2 p-2 rounded-xl flex flex-wrap gap-1.5" style={{ background: '#f9f5eb', border: '1px solid #e8e0d0' }}>{ICON_OPTIONS.map(ic => <button key={ic} onClick={() => { setEditIcon(ic); setShowIconPicker(false) }} className="w-9 h-9 rounded-lg text-lg flex items-center justify-center" style={{ background: editIcon === ic ? '#c9943a' : '#fff' }}>{ic}</button>)}</div>}
                   </div>
                   <div>
                     <label className="block text-xs font-semibold mb-1.5" style={{ color: '#7a6e5a' }}>항목명</label>
-                    <input type="text" value={editName} onChange={e => setEditName(e.target.value)}
-                      className="w-full px-3 py-2.5 rounded-xl outline-none text-sm"
-                      style={{ background: '#f0e9d2', border: '1.5px solid #c9943a', color: '#2c2415' }} />
+                    <input type="text" value={editName} onChange={e => setEditName(e.target.value)} className="w-full px-3 py-2.5 rounded-xl outline-none text-sm" style={{ background: '#f0e9d2', border: '1.5px solid #c9943a', color: '#2c2415' }} />
                   </div>
                   <div>
                     <label className="block text-xs font-semibold mb-1.5" style={{ color: '#7a6e5a' }}>월 금액</label>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold" style={{ color: '#7a6e5a' }}>₩</span>
-                      <input type="text" inputMode="numeric" value={editAmount} onChange={e => setEditAmount(fmt(e.target.value))}
-                        className="w-full pl-8 pr-3 py-2.5 rounded-xl text-right outline-none font-bold text-sm"
-                        style={{ background: '#f0e9d2', border: '1.5px solid #c9943a', color: '#2c2415' }} />
-                    </div>
+                    <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold" style={{ color: '#7a6e5a' }}>₩</span><input type="text" inputMode="numeric" value={editAmount} onChange={e => setEditAmount(fmt(e.target.value))} className="w-full pl-8 pr-3 py-2.5 rounded-xl text-right outline-none font-bold text-sm" style={{ background: '#f0e9d2', border: '1.5px solid #c9943a', color: '#2c2415' }} /></div>
                   </div>
                   <div className="flex gap-2">
-                    <button onClick={() => setEditId(null)} className="flex-1 py-2.5 rounded-xl text-sm font-bold"
-                      style={{ background: '#f0e9d2', color: '#7a6e5a' }}>취소</button>
-                    <button onClick={saveEdit} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white"
-                      style={{ background: '#c9943a' }}>저장</button>
+                    <button onClick={() => setEditId(null)} className="flex-1 py-2.5 rounded-xl text-sm font-bold" style={{ background: '#f0e9d2', color: '#7a6e5a' }}>취소</button>
+                    <button onClick={saveEdit} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white" style={{ background: '#c9943a' }}>저장</button>
                   </div>
                 </div>
               ) : (
-                /* 일반 표시 */
-                <div className="flex items-center gap-3 p-3.5 rounded-xl"
-                  style={{ background: '#fff', border: '1px solid #e8e0d0' }}>
-                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
-                    style={{ background: (exp.color || '#7a9e7e') + '18' }}>{exp.icon}</div>
+                <div className="flex items-center gap-3 p-3.5 rounded-xl" style={{ background: '#fff', border: '1px solid #e8e0d0' }}>
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0" style={{ background: (exp.color || '#7a9e7e') + '18' }}>{exp.icon}</div>
                   <span className="flex-1 text-sm font-medium" style={{ color: '#2c2415' }}>{exp.name}</span>
                   <span className="font-bold text-sm mr-1" style={{ color: '#7a6e5a' }}>{formatKRW(exp.amount)}</span>
-                  <button onClick={() => startEdit(exp)}
-                    className="w-8 h-8 rounded-lg flex items-center justify-center text-sm"
-                    style={{ background: '#fef3e2', color: '#c9943a' }}>✏️</button>
-                  <button onClick={() => onRemove(exp.id)}
-                    className="w-8 h-8 rounded-lg flex items-center justify-center text-sm"
-                    style={{ background: '#fef0ee', color: '#b06a4e' }}>🗑️</button>
+                  <button onClick={() => startEdit(exp)} className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: '#fef3e2', color: '#c9943a' }}>✏️</button>
+                  <button onClick={() => onRemove(exp.id)} className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: '#fef0ee', color: '#b06a4e' }}>🗑️</button>
                 </div>
               )}
             </div>
@@ -441,14 +391,12 @@ function StatsPanel({ data, fixedTotal, onClose }) {
       style={{ background: 'rgba(44,36,21,0.5)', backdropFilter: 'blur(4px)' }}>
       <div className="w-full max-w-md rounded-2xl overflow-hidden animate-slideUp"
         style={{ background: '#fdfcf7', border: '1px solid #e8e0d0', boxShadow: '0 20px 60px rgba(0,0,0,0.15)', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
-        <div className="flex items-center justify-between px-6 py-4"
-          style={{ background: '#f9f5eb', borderBottom: '1px solid #e8e0d0' }}>
+        <div className="flex items-center justify-between px-6 py-4" style={{ background: '#f9f5eb', borderBottom: '1px solid #e8e0d0' }}>
           <div>
             <h3 className="text-lg font-black" style={{ color: '#2c2415' }}>📊 이번달 통계</h3>
             <p className="text-sm font-semibold mt-0.5" style={{ color: '#b06a4e' }}>변동비 합계 {formatKRW(total)}</p>
           </div>
-          <button onClick={onClose} className="w-9 h-9 rounded-xl flex items-center justify-center"
-            style={{ background: '#e8e0d0', color: '#7a6e5a' }}>✕</button>
+          <button onClick={onClose} className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: '#e8e0d0', color: '#7a6e5a' }}>✕</button>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {Object.keys(byWho).length > 0 && (
@@ -531,26 +479,25 @@ export default function Home() {
   const [showFixed, setShowFixed] = useState(false)
   const [showStats, setShowStats] = useState(false)
   const [addDay, setAddDay] = useState(null)
-
-  const { data, addEntry, deleteEntry, monthTotal } = useMonthData(year, month)
-  const { fixed, updateItem, addItem, removeItem } = useFixedExpenses()
-  const fixedTotal = fixed.reduce((s, e) => s + e.amount, 0)
-
-  const daysInMonth = getDaysInMonth(year, month)
-  const firstDay = getFirstDayOfWeek(year, month)
-  const monthNames = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월']
-
   const [showMonthPicker, setShowMonthPicker] = useState(false)
   const [pickerYear, setPickerYear] = useState(now.getFullYear())
-  const { getMonthSaving, setMonthSaving, totalSavings, targetAmount, updateTarget } = useSavings()
   const [editSaving, setEditSaving] = useState(false)
   const [editTarget, setEditTarget] = useState(false)
   const [savingInput, setSavingInput] = useState('')
   const [targetInput, setTargetInput] = useState('')
 
+  const { data, addEntry, deleteEntry, monthTotal } = useMonthData(year, month)
+  const { fixed, updateItem, addItem, removeItem } = useFixedExpenses()
+  const { getMonthSaving, setMonthSaving, totalSavings, targetAmount, updateTarget } = useSavings()
+
+  const fixedTotal = fixed.reduce((s, e) => s + e.amount, 0)
   const thisMonthSaving = getMonthSaving(year, month)
   const savingPct = targetAmount > 0 ? Math.min(100, (totalSavings / targetAmount) * 100) : 0
-  const fmt = (v) => { const n = v.replace(/[^0-9]/g,''); return n ? Number(n).toLocaleString() : '' }
+  const fmt = (v) => { const n = v.replace(/[^0-9]/g, ''); return n ? Number(n).toLocaleString() : '' }
+
+  const daysInMonth = getDaysInMonth(year, month)
+  const firstDay = getFirstDayOfWeek(year, month)
+  const monthNames = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월']
 
   const prevMonth = () => {
     if (month === 0) { setYear(y => y - 1); setMonth(11) } else setMonth(m => m - 1)
@@ -571,11 +518,9 @@ export default function Home() {
               <p className="text-xs" style={{ color: '#9a8e78' }}>남규 & 다경의 기록장</p>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setShowFixed(true)}
-                className="px-3 py-1.5 rounded-xl text-xs font-bold"
+              <button onClick={() => setShowFixed(true)} className="px-3 py-1.5 rounded-xl text-xs font-bold"
                 style={{ background: '#f0e9d2', color: '#7a6e5a', border: '1px solid #e0d4b8' }}>📌 고정비</button>
-              <button onClick={() => setShowStats(true)}
-                className="px-3 py-1.5 rounded-xl text-xs font-bold"
+              <button onClick={() => setShowStats(true)} className="px-3 py-1.5 rounded-xl text-xs font-bold"
                 style={{ background: '#f0e9d2', color: '#7a6e5a', border: '1px solid #e0d4b8' }}>📊 통계</button>
             </div>
           </div>
@@ -598,7 +543,7 @@ export default function Home() {
             <button onClick={nextMonth} className="w-8 h-8 rounded-xl flex items-center justify-center hover:bg-white/10 transition-all">→</button>
           </div>
 
-          {/* 연월 피커 드롭다운 */}
+          {/* 월 피커 드롭다운 */}
           {showMonthPicker && (
             <div className="mx-4 mb-3 rounded-xl overflow-hidden" style={{ background: 'rgba(0,0,0,0.2)' }}>
               <div className="flex items-center justify-between px-3 py-2">
@@ -642,31 +587,22 @@ export default function Home() {
 
           {/* 이번달 저축 / 총 저축 */}
           <div className="grid grid-cols-2 gap-3 px-4 pb-3" style={{ borderTop: '1px solid rgba(255,255,255,0.15)', paddingTop: '10px' }}>
-            {/* 이번달 저축 */}
             <div className="p-3 rounded-xl" style={{ background: 'rgba(255,255,255,0.15)' }}>
               <p className="text-xs opacity-80 mb-1">이번달 저축</p>
               {editSaving ? (
-                <div className="flex items-center gap-1">
-                  <input autoFocus type="text" inputMode="numeric"
-                    value={savingInput}
-                    onChange={e => setSavingInput(fmt(e.target.value))}
-                    onBlur={() => { setMonthSaving(year, month, Number(savingInput.replace(/,/g,''))); setEditSaving(false) }}
-                    onKeyDown={e => { if (e.key === 'Enter') { setMonthSaving(year, month, Number(savingInput.replace(/,/g,''))); setEditSaving(false) } }}
-                    className="w-full bg-transparent outline-none font-black text-sm text-white border-b border-white/50"
-                    placeholder="0"
-                    style={{ color: '#fff' }}
-                  />
-                </div>
+                <input autoFocus type="text" inputMode="numeric" value={savingInput}
+                  onChange={e => setSavingInput(fmt(e.target.value))}
+                  onBlur={() => { setMonthSaving(year, month, Number(savingInput.replace(/,/g, ''))); setEditSaving(false) }}
+                  onKeyDown={e => { if (e.key === 'Enter') { setMonthSaving(year, month, Number(savingInput.replace(/,/g, ''))); setEditSaving(false) } }}
+                  className="w-full bg-transparent outline-none font-black text-lg border-b border-white/50"
+                  style={{ color: '#fff' }} />
               ) : (
-                <button onClick={() => { setSavingInput(thisMonthSaving.toLocaleString()); setEditSaving(true) }}
-                  className="text-left w-full">
+                <button onClick={() => { setSavingInput(thisMonthSaving.toLocaleString()); setEditSaving(true) }} className="text-left w-full">
                   <p className="text-lg font-black">{formatKRW(thisMonthSaving)}</p>
                   <p className="text-[10px] opacity-60 mt-0.5">탭하여 수정 ✏️</p>
                 </button>
               )}
             </div>
-
-            {/* 총 저축 */}
             <div className="p-3 rounded-xl" style={{ background: 'rgba(255,255,255,0.15)' }}>
               <p className="text-xs opacity-80 mb-1">총 저축액</p>
               <p className="text-lg font-black">{formatKRW(totalSavings)}</p>
@@ -674,21 +610,19 @@ export default function Home() {
             </div>
           </div>
 
-          {/* 매매자금 목표 게이지 */}
+          {/* 매매자금 게이지 */}
           <div className="px-4 pb-4" style={{ borderTop: '1px solid rgba(255,255,255,0.15)', paddingTop: '10px' }}>
             <div className="flex justify-between items-center mb-2">
               <span className="text-sm font-bold opacity-90">🏠 매매자금 목표</span>
               {editTarget ? (
                 <div className="flex items-center gap-1">
                   <span className="text-xs opacity-70">₩</span>
-                  <input autoFocus type="text" inputMode="numeric"
-                    value={targetInput}
+                  <input autoFocus type="text" inputMode="numeric" value={targetInput}
                     onChange={e => setTargetInput(fmt(e.target.value))}
-                    onBlur={() => { updateTarget(Number(targetInput.replace(/,/g,''))); setEditTarget(false) }}
-                    onKeyDown={e => { if (e.key === 'Enter') { updateTarget(Number(targetInput.replace(/,/g,''))); setEditTarget(false) } }}
+                    onBlur={() => { updateTarget(Number(targetInput.replace(/,/g, ''))); setEditTarget(false) }}
+                    onKeyDown={e => { if (e.key === 'Enter') { updateTarget(Number(targetInput.replace(/,/g, ''))); setEditTarget(false) } }}
                     className="bg-transparent outline-none font-bold text-sm border-b border-white/50 w-28 text-right"
-                    style={{ color: '#fff' }}
-                  />
+                    style={{ color: '#fff' }} />
                 </div>
               ) : (
                 <button onClick={() => { setTargetInput(targetAmount.toLocaleString()); setEditTarget(true) }}
@@ -697,13 +631,9 @@ export default function Home() {
                 </button>
               )}
             </div>
-            {/* 게이지 바 */}
             <div className="h-3 rounded-full overflow-hidden" style={{ background: 'rgba(0,0,0,0.25)' }}>
               <div className="h-full rounded-full transition-all duration-700"
-                style={{
-                  width: `${savingPct}%`,
-                  background: savingPct >= 100 ? '#f0c040' : 'linear-gradient(90deg, rgba(255,255,255,0.6), rgba(255,255,255,0.9))'
-                }} />
+                style={{ width: `${savingPct}%`, background: savingPct >= 100 ? '#f0c040' : 'linear-gradient(90deg, rgba(255,255,255,0.6), rgba(255,255,255,0.9))' }} />
             </div>
             <div className="flex justify-between mt-1.5">
               <span className="text-xs opacity-70">{formatKRW(totalSavings)} 달성</span>
@@ -735,10 +665,7 @@ export default function Home() {
                   className="min-h-[60px] p-1.5 cursor-pointer transition-all border-r border-b"
                   style={{ borderColor: '#f0e9d2', background: isSelected ? '#f0e9d2' : 'transparent' }}>
                   <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold mb-1"
-                    style={{
-                      background: isToday ? '#5d8a62' : 'transparent',
-                      color: isToday ? '#fff' : col === 0 ? '#b06a4e' : col === 6 ? '#4a90b8' : '#2c2415',
-                    }}>{day}</div>
+                    style={{ background: isToday ? '#5d8a62' : 'transparent', color: isToday ? '#fff' : col === 0 ? '#b06a4e' : col === 6 ? '#4a90b8' : '#2c2415' }}>{day}</div>
                   {dayTotal > 0 && (
                     <div className="text-[10px] font-bold" style={{ color: '#b06a4e' }}>
                       {dayTotal >= 10000 ? `${(dayTotal/10000).toFixed(dayTotal>=100000?0:1)}만` : formatKRW(dayTotal)}
